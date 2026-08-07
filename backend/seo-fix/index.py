@@ -228,7 +228,7 @@ def handler(event: dict, context) -> dict:
 
         elif check_id == 'og_tags':
             og_title = raw.get('current_title') or raw.get('h1') or ''
-            og_description = generate_description(raw.get('current_title'), raw.get('h1'))
+            og_description = custom_value or generate_description(raw.get('current_title'), raw.get('h1'))
             ok, resp = apply_og_fix(post_id, post_type, og_title, og_description)
             save_fix(audit_id, check_id, 'og_tags', '', f'{og_title} / {og_description}', 'success' if ok else 'error',
                       'Open Graph теги обновлены' if ok else f'Ошибка WordPress: {resp}')
