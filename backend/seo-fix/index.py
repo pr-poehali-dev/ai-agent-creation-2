@@ -59,6 +59,12 @@ def apply_title_fix(post_id, post_type, new_title):
     return status in (200, 201), resp
 
 
+def apply_content_fix(post_id, post_type, new_content):
+    # Текст описания записи/товара (поле content)
+    status, resp = wp_request('POST', f'wp/v2/{post_type}/{post_id}', {'content': new_content})
+    return status in (200, 201), resp
+
+
 def apply_seo_title_fix(post_id, post_type, new_seo_title):
     # SEO-заголовок Rank Math (отдельно от заголовка записи)
     status, resp = wp_request(
@@ -298,6 +304,18 @@ def handler(event: dict, context) -> dict:
             save_fix(audit_id, check_id, 'description', old_value, new_description, 'success' if ok else 'error',
                       'Meta description обновлено' if ok else f'Ошибка WordPress: {resp}')
             message = 'Meta description успешно обновлено' if ok else 'Не удалось обновить description'
+
+        elif check_id == 'content':
+            if not custom_value:
+                return {
+                    'statusCode': 400,
+                    'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Не передан новый текст описания (value)'}, ensure_ascii=False),
+                }
+            ok, resp = apply_content_fix(post_id, post_type, custom_value)
+            save_fix(audit_id, check_id, 'content', '', custom_value[:500], 'success' if ok else 'error',
+                      'Описание товара обновлено' if ok else f'Ошибка WordPress: {resp}')
+            message = 'Описание успешно обновлено' if ok else 'Не удалось обновить описание'
 
         elif check_id == 'seo_title':
             new_seo_title = custom_value or (raw.get('current_title') or raw.get('h1') or 'Страница сайта')
