@@ -5,6 +5,7 @@ import base64
 import urllib.request
 import urllib.error
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg2  # noqa: F401 автоисправление SEO через WP REST API
 
@@ -321,23 +322,24 @@ def handler(event: dict, context) -> dict:
                     'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
                     'body': json.dumps({'error': 'Не найдено изображений без alt для этой страницы'}, ensure_ascii=False),
                 }
-            fixed = 0
-            failed = 0
-            details = []
-            for idx, img_url in enumerate(images):
+
+            def process_one(args):
+                idx, img_url = args
                 media_id = find_media_id_by_url(img_url)
                 if not media_id:
-                    failed += 1
-                    details.append(f'{img_url}: не найдено в медиабиблиотеке')
-                    continue
+                    return (False, f'{img_url}: не найдено в медиабиблиотеке')
                 alt_text = generate_alt_text(raw.get('current_title'), raw.get('h1'), idx)
                 ok_one, resp_one = apply_alt_fix(media_id, alt_text)
                 if ok_one:
-                    fixed += 1
-                    details.append(f'{img_url}: «{alt_text}»')
-                else:
-                    failed += 1
-                    details.append(f'{img_url}: ошибка {resp_one}')
+                    return (True, f'{img_url}: «{alt_text}»')
+                return (False, f'{img_url}: ошибка {resp_one}')
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(process_one, enumerate(images)))
+
+            fixed = sum(1 for r in results if r[0])
+            failed = len(results) - fixed
+            details = [r[1] for r in results]
 
             ok = fixed > 0
             save_fix(audit_id, check_id, 'alt', '', '; '.join(details), 'success' if ok else 'error',

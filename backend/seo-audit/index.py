@@ -195,7 +195,8 @@ def resolve_wp_post(body_class: str):
         return int(m.group(1)), 'pages'
     m = re.search(r'\bpostid-(\d+)\b', body_class)
     if m:
-        return int(m.group(1)), 'posts'
+        is_product = bool(re.search(r'\bsingle-product\b', body_class))
+        return int(m.group(1)), 'product' if is_product else 'posts'
     return None, None
 
 
