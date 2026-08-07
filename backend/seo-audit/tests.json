@@ -1,0 +1,32 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "GET method not allowed",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 405
+    },
+    {
+      "name": "POST without url",
+      "method": "POST",
+      "path": "/",
+      "body": {},
+      "expectedStatus": 400
+    },
+    {
+      "name": "POST valid site audit",
+      "method": "POST",
+      "path": "/",
+      "body": { "url": "https://example.com" },
+      "expectedStatus": 200,
+      "expectedBody": { "url": "string", "score": "number", "checks": "array" },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
