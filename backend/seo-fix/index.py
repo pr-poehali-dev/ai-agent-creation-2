@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import psycopg2  # noqa: F401 автоисправление SEO через WP REST API
 
@@ -85,6 +87,66 @@ def apply_og_fix(post_id, post_type, og_title, og_description):
     return status in (200, 201), resp
 
 
+def find_media_id_by_url(image_url):
+    filename = image_url.rstrip('/').split('/')[-1]
+    filename = filename.rsplit('.', 1)[0]
+    filename = re_sub_size_suffix(filename)
+    try:
+        status, resp = wp_request('GET', f'wp/v2/media?search={urllib.parse.quote(filename)}&per_page=5')
+    except Exception:
+        return None
+    if not isinstance(resp, list):
+        return None
+    for item in resp:
+        source_url = item.get('source_url', '')
+        if source_url and (source_url == image_url or source_url.rsplit('/', 1)[-1] == image_url.rsplit('/', 1)[-1]):
+            return item.get('id')
+    if resp:
+        return resp[0].get('id')
+    return None
+
+
+def re_sub_size_suffix(filename):
+    return re.sub(r'-\d+x\d+$', '', filename)
+
+
+def apply_alt_fix(media_id, alt_text):
+    status, resp = wp_request('POST', f'wp/v2/media/{media_id}', {'alt_text': alt_text})
+    return status in (200, 201), resp
+
+
+def generate_alt_text(context_title, context_h1, index):
+    api_key = os.environ.get('OPENAI_API_KEY')
+    base = context_h1 or context_title or 'Изображение на странице сайта'
+    if not api_key:
+        return f'{base} — фото {index + 1}'[:120]
+    prompt = (
+        f"Напиши короткий SEO alt-текст на русском для изображения №{index + 1} на странице «{base}». "
+        "Длина 5-12 слов, без кавычек, конкретно опиши, что может быть на фото, без общих слов."
+    )
+    try:
+        req = urllib.request.Request(
+            'https://api.openai.com/v1/chat/completions',
+            data=json.dumps({
+                'model': 'gpt-4o-mini',
+                'messages': [{'role': 'user', 'content': prompt}],
+                'temperature': 0.6,
+                'max_tokens': 60,
+            }).encode('utf-8'),
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+            },
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            text = data['choices'][0]['message']['content'].strip().strip('"')
+            return text[:120]
+    except Exception:
+        return f'{base} — фото {index + 1}'[:120]
+
+
 def generate_description(context_title, context_h1):
     api_key = os.environ.get('OPENAI_API_KEY')
     base = context_h1 or context_title or 'Страница сайта'
@@ -161,8 +223,9 @@ def get_audit(audit_id):
 
 def handler(event: dict, context) -> dict:
     """Применяет автоматическое исправление найденной технической SEO-проблемы
-    на сайте WordPress через REST API (title, meta description и Open Graph теги
-    в Rank Math), сохраняет результат исправления в базу данных."""
+    на сайте WordPress через REST API (title, SEO-заголовок и meta description
+    Rank Math, Open Graph теги, alt-атрибуты изображений в медиабиблиотеке),
+    сохраняет результат исправления в базу данных."""
 
     method = event.get('httpMethod', 'GET')
 
@@ -249,6 +312,37 @@ def handler(event: dict, context) -> dict:
             save_fix(audit_id, check_id, 'og_tags', '', f'{og_title} / {og_description}', 'success' if ok else 'error',
                       'Open Graph теги обновлены' if ok else f'Ошибка WordPress: {resp}')
             message = 'Open Graph теги успешно обновлены' if ok else 'Не удалось обновить Open Graph'
+
+        elif check_id == 'alt':
+            images = raw.get('images_without_alt') or []
+            if not images:
+                return {
+                    'statusCode': 200,
+                    'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Не найдено изображений без alt для этой страницы'}, ensure_ascii=False),
+                }
+            fixed = 0
+            failed = 0
+            details = []
+            for idx, img_url in enumerate(images):
+                media_id = find_media_id_by_url(img_url)
+                if not media_id:
+                    failed += 1
+                    details.append(f'{img_url}: не найдено в медиабиблиотеке')
+                    continue
+                alt_text = generate_alt_text(raw.get('current_title'), raw.get('h1'), idx)
+                ok_one, resp_one = apply_alt_fix(media_id, alt_text)
+                if ok_one:
+                    fixed += 1
+                    details.append(f'{img_url}: «{alt_text}»')
+                else:
+                    failed += 1
+                    details.append(f'{img_url}: ошибка {resp_one}')
+
+            ok = fixed > 0
+            save_fix(audit_id, check_id, 'alt', '', '; '.join(details), 'success' if ok else 'error',
+                      f'Обновлено {fixed} из {len(images)} изображений')
+            message = f'Alt-текст добавлен для {fixed} из {len(images)} изображений' + (f', {failed} не удалось' if failed else '')
 
         else:
             return {
