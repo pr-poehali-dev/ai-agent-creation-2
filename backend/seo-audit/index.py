@@ -4,8 +4,11 @@ import re
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from urllib.parse import urljoin, urlparse
 import html.parser
+
+import psycopg2
 
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -15,6 +18,8 @@ CORS_HEADERS = {
 }
 
 UA = 'Mozilla/5.0 (compatible; SEOAuditBot/1.0; +https://poehali.dev)'
+
+FIXABLE_CHECKS = {'title', 'description', 'alt', 'og_tags'}
 
 
 class PageParser(html.parser.HTMLParser):
@@ -29,7 +34,7 @@ class PageParser(html.parser.HTMLParser):
         self.images = []
         self.ld_json_count = 0
         self.og = {}
-        self._current_tag = None
+        self.body_class = ''
         self._current_heading = None
         self._in_title = False
         self._in_ldjson = False
@@ -38,6 +43,8 @@ class PageParser(html.parser.HTMLParser):
         attrs_dict = dict(attrs)
         if tag == 'title':
             self._in_title = True
+        elif tag == 'body':
+            self.body_class = attrs_dict.get('class', '')
         elif tag == 'meta':
             name = (attrs_dict.get('name') or '').lower()
             prop = (attrs_dict.get('property') or '').lower()
@@ -178,10 +185,65 @@ def run_ai_recommendations(url, checks):
         return None
 
 
+def resolve_wp_post(body_class: str):
+    """Пытается определить ID и тип записи WordPress по классам <body>,
+    которые генерирует стандартная функция body_class()."""
+    if not body_class:
+        return None, None
+    m = re.search(r'\bpage-id-(\d+)\b', body_class)
+    if m:
+        return int(m.group(1)), 'pages'
+    m = re.search(r'\bpostid-(\d+)\b', body_class)
+    if m:
+        return int(m.group(1)), 'posts'
+    return None, None
+
+
+def get_db_connection():
+    dsn = os.environ.get('DATABASE_URL')
+    if not dsn:
+        return None
+    return psycopg2.connect(dsn)
+
+
+def table_name(name):
+    schema = os.environ.get('MAIN_DB_SCHEMA')
+    return f'"{schema}"."{name}"' if schema else name
+
+
+def save_audit(url, wp_post_id, wp_post_type, score, checks, performance, ai_recommendations, raw_data, wp_available):
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {table_name('seo_audits')} (url, wp_post_id, wp_post_type, score, checks, performance, ai_recommendations, raw_data, wp_available)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    url, wp_post_id, wp_post_type, score,
+                    json.dumps(checks, ensure_ascii=False),
+                    json.dumps(performance, ensure_ascii=False) if performance else None,
+                    ai_recommendations,
+                    json.dumps(raw_data, ensure_ascii=False),
+                    wp_available,
+                ),
+            )
+            audit_id = cur.fetchone()[0]
+        conn.commit()
+        return audit_id
+    finally:
+        conn.close()
+
+
 def handler(event: dict, context) -> dict:
     """Технический SEO-аудит сайта: мета-теги, заголовки, robots.txt, sitemap.xml,
-    HTTPS, канонические ссылки, alt-атрибуты, structured data, скорость (PageSpeed)
-    и рекомендации от ИИ по найденным проблемам."""
+    HTTPS, канонические ссылки, alt-атрибуты, structured data, скорость (PageSpeed),
+    рекомендации от ИИ, определение записи WordPress для последующего автоисправления
+    и сохранение результата проверки в историю."""
 
     method = event.get('httpMethod', 'GET')
 
@@ -286,6 +348,7 @@ def handler(event: dict, context) -> dict:
     )
 
     images_total = len(parser.images)
+    images_without_alt = [img['src'] for img in parser.images if not img.get('alt') and img.get('src')][:10]
     images_no_alt = sum(1 for img in parser.images if not img.get('alt'))
     if images_total == 0:
         add_check(checks, 'Изображения', 'alt', 'ok', 'Alt-атрибуты', 'На странице нет изображений', weight=2)
@@ -347,12 +410,33 @@ def handler(event: dict, context) -> dict:
     performance = run_pagespeed(target_url)
     ai_recommendations = run_ai_recommendations(target_url, checks)
 
+    wp_post_id, wp_post_type = resolve_wp_post(parser.body_class)
+    wp_site_url = (os.environ.get('WP_SITE_URL') or '').rstrip('/')
+    wp_creds_ok = bool(wp_site_url and os.environ.get('WP_USERNAME') and os.environ.get('WP_APP_PASSWORD'))
+    domain_match = wp_creds_ok and urlparse(wp_site_url).netloc == parsed.netloc
+    wp_available = bool(domain_match and wp_post_id)
+
+    for c in checks:
+        c['fixable'] = wp_available and c['id'] in FIXABLE_CHECKS and c['status'] in ('error', 'warning')
+
+    raw_data = {
+        'current_title': title,
+        'current_description': description,
+        'h1': h1_list[0] if h1_list else '',
+        'images_without_alt': images_without_alt,
+    }
+
+    audit_id = save_audit(target_url, wp_post_id, wp_post_type, score, checks, performance, ai_recommendations, raw_data, wp_available)
+
     result = {
+        'audit_id': audit_id,
         'url': target_url,
         'score': score,
         'checks': checks,
         'performance': performance,
         'ai_recommendations': ai_recommendations,
+        'wp_available': wp_available,
+        'wp_post_id': wp_post_id,
         'checked_at': int(time.time()),
     }
 
