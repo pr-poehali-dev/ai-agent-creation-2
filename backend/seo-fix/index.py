@@ -56,6 +56,15 @@ def apply_title_fix(post_id, post_type, new_title):
     return status in (200, 201), resp
 
 
+def apply_seo_title_fix(post_id, post_type, new_seo_title):
+    # SEO-заголовок Rank Math (отдельно от заголовка записи)
+    status, resp = wp_request(
+        'POST', f'wp/v2/{post_type}/{post_id}',
+        {'meta': {'rank_math_title': new_seo_title}},
+    )
+    return status in (200, 201), resp
+
+
 def apply_description_fix(post_id, post_type, new_description):
     # Rank Math хранит meta description в поле rank_math_description
     status, resp = wp_request(
@@ -225,6 +234,13 @@ def handler(event: dict, context) -> dict:
             save_fix(audit_id, check_id, 'description', old_value, new_description, 'success' if ok else 'error',
                       'Meta description обновлено' if ok else f'Ошибка WordPress: {resp}')
             message = 'Meta description успешно обновлено' if ok else 'Не удалось обновить description'
+
+        elif check_id == 'seo_title':
+            new_seo_title = custom_value or (raw.get('current_title') or raw.get('h1') or 'Страница сайта')
+            ok, resp = apply_seo_title_fix(post_id, post_type, new_seo_title)
+            save_fix(audit_id, check_id, 'seo_title', '', new_seo_title, 'success' if ok else 'error',
+                      'SEO-заголовок обновлён' if ok else f'Ошибка WordPress: {resp}')
+            message = 'SEO-заголовок успешно обновлён' if ok else 'Не удалось обновить SEO-заголовок'
 
         elif check_id == 'og_tags':
             og_title = raw.get('current_title') or raw.get('h1') or ''
