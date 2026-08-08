@@ -65,6 +65,12 @@ def apply_content_fix(post_id, post_type, new_content):
     return status in (200, 201), resp
 
 
+def apply_excerpt_fix(post_id, post_type, new_excerpt):
+    # Краткое описание (excerpt) — попадает в meta/og при незаполненных полях Rank Math
+    status, resp = wp_request('POST', f'wp/v2/{post_type}/{post_id}', {'excerpt': new_excerpt})
+    return status in (200, 201), resp
+
+
 def apply_seo_title_fix(post_id, post_type, new_seo_title):
     # SEO-заголовок Rank Math (отдельно от заголовка записи)
     status, resp = wp_request(
@@ -316,6 +322,18 @@ def handler(event: dict, context) -> dict:
             save_fix(audit_id, check_id, 'content', '', custom_value[:500], 'success' if ok else 'error',
                       'Описание товара обновлено' if ok else f'Ошибка WordPress: {resp}')
             message = 'Описание успешно обновлено' if ok else 'Не удалось обновить описание'
+
+        elif check_id == 'excerpt':
+            if not custom_value:
+                return {
+                    'statusCode': 400,
+                    'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Не передан новый текст краткого описания (value)'}, ensure_ascii=False),
+                }
+            ok, resp = apply_excerpt_fix(post_id, post_type, custom_value)
+            save_fix(audit_id, check_id, 'excerpt', '', custom_value[:500], 'success' if ok else 'error',
+                      'Краткое описание обновлено' if ok else f'Ошибка WordPress: {resp}')
+            message = 'Краткое описание успешно обновлено' if ok else 'Не удалось обновить краткое описание'
 
         elif check_id == 'seo_title':
             new_seo_title = custom_value or (raw.get('current_title') or raw.get('h1') or 'Страница сайта')
