@@ -63,46 +63,43 @@ def strip_html(text):
     return text
 
 
-def generate_description(title, content_excerpt):
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        base = title or 'Товар интим-магазина'
-        return f'{base}. Подробное описание, характеристики и доставка — на сайте.'[:155]
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+CTA_VARIANTS = [
+    'Доставка и конфиденциальная упаковка.',
+    'В наличии, доставка по всей России.',
+    'Подробные характеристики — в карточке товара.',
+    'Заказывайте с быстрой доставкой.',
+]
 
-    prompt = (
-        f"Товар интернет-магазина интим-товаров: «{title}».\n"
-        f"Фрагмент описания товара: «{content_excerpt[:400]}»\n\n"
-        "Напиши SEO meta description на русском языке строго 120-155 символов. "
-        "Требования:\n"
-        "- Уникальный текст, не шаблонная фраза\n"
-        "- Упомяни название товара и его ключевую особенность\n"
-        "- Без кавычек и эмодзи\n"
-        "- НЕ давай обещаний конкретного физиологического эффекта (запрещено законом о рекламе РФ): "
-        "нельзя писать про гарантированный оргазм, взрывные ощущения и т.п.\n"
-        "- Нейтральный, продающий тон, можно с лёгким призывом к действию"
-    )
-    try:
-        req = urllib.request.Request(
-            'https://api.openai.com/v1/chat/completions',
-            data=json.dumps({
-                'model': 'gpt-4o-mini',
-                'messages': [{'role': 'user', 'content': prompt}],
-                'temperature': 0.6,
-                'max_tokens': 120,
-            }).encode('utf-8'),
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-            },
-            method='POST',
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            text = data['choices'][0]['message']['content'].strip().strip('"')
-            return text[:160]
-    except Exception:
-        base = title or 'Товар интим-магазина'
-        return f'{base}. Подробное описание, характеристики и доставка — на сайте.'[:155]
+
+def generate_description(title, content_excerpt):
+    """Формирует meta description без обращения к внешнему ИИ-сервису:
+    берёт название товара и первое осмысленное предложение из его описания,
+    собирает из них компактный уникальный текст 70-155 символов."""
+    title_clean = (title or 'Товар интим-магазина').strip()
+
+    info_sentence = ''
+    if content_excerpt:
+        title_start = title_clean.lower()[:20]
+        for raw_sentence in SENTENCE_SPLIT_RE.split(content_excerpt):
+            sentence = raw_sentence.strip()
+            if 25 <= len(sentence) <= 220 and not sentence.lower().startswith(title_start):
+                info_sentence = sentence
+                break
+
+    if info_sentence:
+        desc = f'{title_clean}. {info_sentence}'
+    else:
+        cta_index = abs(hash(title_clean)) % len(CTA_VARIANTS)
+        desc = f'{title_clean}. {CTA_VARIANTS[cta_index]}'
+
+    if len(desc) > 155:
+        desc = desc[:152].rsplit(' ', 1)[0].rstrip('.,;:') + '…'
+    elif len(desc) < 70:
+        cta_index = abs(hash(title_clean)) % len(CTA_VARIANTS)
+        desc = f'{desc} {CTA_VARIANTS[cta_index]}'[:155]
+
+    return desc
 
 
 def apply_description(post_id, new_description):
@@ -157,11 +154,12 @@ def process_product(product):
 
 def handler(event: dict, context) -> dict:
     """Массово генерирует и применяет уникальные SEO meta description (Rank Math)
-    для товаров WordPress/WooCommerce, у которых описание не заполнено.
-    Обрабатывает одну страницу списка товаров WP REST API за вызов (пагинация),
-    генерирует текст через OpenAI с учётом требований закона о рекламе РФ
-    (без обещаний физиологического эффекта), применяет через WP REST API
-    и логирует результат в БД."""
+    для товаров WordPress/WooCommerce, у которых описание не заполнено или
+    содержит устаревший шаблонный fallback-текст. Обрабатывает одну страницу
+    списка товаров WP REST API за вызов (пагинация). Текст собирается из
+    названия товара и первого информативного предложения его описания (без
+    обращения к внешним ИИ-сервисам), применяется через WP REST API и
+    логируется в БД."""
 
     method = event.get('httpMethod', 'GET')
 
