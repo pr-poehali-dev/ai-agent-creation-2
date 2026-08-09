@@ -132,13 +132,19 @@ def log_result(wp_post_id, product_title, new_description, status, message):
         conn.close()
 
 
+FALLBACK_SIGNATURE = 'Подробное описание, характеристики и доставка — на сайте.'
+
+
 def process_product(product):
     post_id = product.get('id')
     title = strip_html((product.get('title') or {}).get('rendered', ''))
     content = strip_html((product.get('content') or {}).get('rendered', ''))
     existing_desc = ((product.get('meta') or {}).get('rank_math_description') or '').strip()
 
-    if existing_desc:
+    # Считаем "пустым" отсутствие описания или ранее применённый шаблонный
+    # fallback-текст (без ИИ) — его нужно заменить на уникальный вариант.
+    is_fallback = existing_desc.endswith(FALLBACK_SIGNATURE)
+    if existing_desc and not is_fallback:
         return {'id': post_id, 'title': title, 'status': 'skipped', 'message': 'Описание уже заполнено'}
 
     new_description = generate_description(title, content)
