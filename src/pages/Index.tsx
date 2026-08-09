@@ -160,19 +160,36 @@ export default function Index() {
     if (!result?.audit_id) return;
     setFixStates((prev) => ({ ...prev, [check.id]: "applying" }));
     try {
-      const res = await fetch(SEO_FIX_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audit_id: result.audit_id, check_id: check.id }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setFixStates((prev) => ({ ...prev, [check.id]: "done" }));
-        setFixMessages((prev) => ({ ...prev, [check.id]: data.message || "Исправлено" }));
-      } else {
-        setFixStates((prev) => ({ ...prev, [check.id]: "failed" }));
-        setFixMessages((prev) => ({ ...prev, [check.id]: data.error || data.message || "Не удалось исправить" }));
+      // Для alt-текстов на страницах с большим количеством изображений
+      // фикс применяется пачками (иначе функция не укладывается в таймаут),
+      // поэтому дозапрашиваем оставшиеся картинки, пока не будет done: true.
+      let offset = 0;
+      let lastMessage = "";
+      let anySuccess = false;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const res = await fetch(SEO_FIX_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audit_id: result.audit_id,
+            check_id: check.id,
+            ...(check.id === "alt" ? { image_offset: offset, image_limit: 6 } : {}),
+          }),
+        });
+        const data = await res.json();
+        if (!data.success && !data.done) {
+          setFixStates((prev) => ({ ...prev, [check.id]: "failed" }));
+          setFixMessages((prev) => ({ ...prev, [check.id]: data.error || data.message || "Не удалось исправить" }));
+          return;
+        }
+        anySuccess = anySuccess || data.success;
+        lastMessage = data.message || "Исправлено";
+        if (check.id !== "alt" || data.done || !data.next_offset) break;
+        offset = data.next_offset;
       }
+      setFixStates((prev) => ({ ...prev, [check.id]: anySuccess ? "done" : "failed" }));
+      setFixMessages((prev) => ({ ...prev, [check.id]: lastMessage }));
     } catch {
       setFixStates((prev) => ({ ...prev, [check.id]: "failed" }));
       setFixMessages((prev) => ({ ...prev, [check.id]: "Ошибка соединения" }));

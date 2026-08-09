@@ -359,6 +359,12 @@ def handler(event: dict, context) -> dict:
                     'body': json.dumps({'error': 'Не найдено изображений без alt для этой страницы'}, ensure_ascii=False),
                 }
 
+            # Обрабатываем изображения пачками, чтобы не упираться в таймаут
+            # функции при большом количестве картинок на странице.
+            image_offset = int(body.get('image_offset') or 0)
+            image_limit = int(body.get('image_limit') or 6)
+            batch = list(enumerate(images))[image_offset:image_offset + image_limit]
+
             def process_one(args):
                 idx, img_url = args
                 media_id = find_media_id_by_url(img_url)
@@ -370,17 +376,36 @@ def handler(event: dict, context) -> dict:
                     return (True, f'{img_url}: «{alt_text}»')
                 return (False, f'{img_url}: ошибка {resp_one}')
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                results = list(pool.map(process_one, enumerate(images)))
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                results = list(pool.map(process_one, batch))
 
             fixed = sum(1 for r in results if r[0])
             failed = len(results) - fixed
             details = [r[1] for r in results]
+            next_offset = image_offset + image_limit
+            done = next_offset >= len(images)
 
-            ok = fixed > 0
-            save_fix(audit_id, check_id, 'alt', '', '; '.join(details), 'success' if ok else 'error',
-                      f'Обновлено {fixed} из {len(images)} изображений')
-            message = f'Alt-текст добавлен для {fixed} из {len(images)} изображений' + (f', {failed} не удалось' if failed else '')
+            ok = fixed > 0 or len(batch) == 0
+            save_fix(audit_id, check_id, 'alt', '', '; '.join(details), 'success' if fixed > 0 else 'error',
+                      f'Обновлено {fixed} из {len(batch)} изображений (пачка {image_offset}-{image_offset + len(batch)} из {len(images)})')
+            message = (
+                f'Alt-текст добавлен для {fixed} из {len(batch)} изображений в этой пачке'
+                + (f', {failed} не удалось' if failed else '')
+                + (f'. Осталось ещё {len(images) - next_offset} изображений — вызовите с image_offset={next_offset}' if not done else '. Все изображения обработаны')
+            )
+
+            return {
+                'statusCode': 200,
+                'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'success': ok,
+                    'message': message,
+                    'done': done,
+                    'next_offset': None if done else next_offset,
+                    'total_images': len(images),
+                    'fixed_in_batch': fixed,
+                }, ensure_ascii=False),
+            }
 
         else:
             return {
