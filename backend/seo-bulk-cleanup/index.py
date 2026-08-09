@@ -138,7 +138,10 @@ def handler(event: dict, context) -> dict:
     сообществу... Хотите быть в курсе самых горячих новинок...') из основного
     описания (content) и краткого описания (excerpt) товаров WordPress/WooCommerce.
     Обрабатывает одну страницу списка товаров WP REST API за вызов (пагинация),
-    применяет изменения через WP REST API и логирует результат в БД."""
+    применяет изменения через WP REST API и логирует результат в БД.
+    Также поддерживает режим custom_texts — точечное применение готовых
+    уникальных текстов описания к конкретным ID товаров (устранение дублей
+    контента у похожих товаров-вариаций)."""
 
     method = event.get('httpMethod', 'GET')
 
@@ -156,6 +159,45 @@ def handler(event: dict, context) -> dict:
         body = json.loads(event.get('body') or '{}')
     except json.JSONDecodeError:
         body = {}
+
+    # Режим точечного применения готовых уникальных текстов по ID товаров
+    # (для устранения дублей контента у групп похожих товаров).
+    custom_texts = body.get('custom_texts')
+    if custom_texts:
+        def apply_one(item):
+            post_id_str, fields = item
+            post_id = int(post_id_str)
+            update_fields = {}
+            if fields.get('content'):
+                update_fields['content'] = fields['content']
+            if fields.get('excerpt'):
+                update_fields['excerpt'] = fields['excerpt']
+            if not update_fields:
+                return {'id': post_id, 'status': 'skipped', 'message': 'Нет данных для обновления'}
+            ok, resp = update_product_fields(post_id, update_fields)
+            status = 'success' if ok else 'error'
+            message = (
+                f"Уникальный текст применён: {', '.join(update_fields.keys())}" if ok
+                else f'Ошибка WordPress: {resp}'
+            )
+            log_result(post_id, fields.get('title', ''), ','.join(update_fields.keys()), status, message)
+            return {'id': post_id, 'status': status, 'message': message}
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(apply_one, custom_texts.items()))
+
+        processed = sum(1 for r in results if r['status'] == 'success')
+        errors = sum(1 for r in results if r['status'] == 'error')
+        return {
+            'statusCode': 200,
+            'headers': {**CORS_HEADERS, 'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'done': True,
+                'processed': processed,
+                'errors': errors,
+                'results': results,
+            }, ensure_ascii=False),
+        }
 
     page = int(body.get('page') or 1)
     per_page = min(int(body.get('per_page') or 15), 30)
